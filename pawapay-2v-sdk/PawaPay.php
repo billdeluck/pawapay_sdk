@@ -228,6 +228,63 @@ class PawaPay
     }
 
     /**
+     * Create a Payment Page for redirect-based payments
+     *
+     * This method creates a hosted payment page URL that customers can be redirected to.
+     * The payment page provides a complete mobile money payment experience.
+     *
+     * @param array $data Payment page data containing:
+     *                    - depositId: UUIDv4 unique ID (required)
+     *                    - returnUrl: URL to redirect customer after payment (required)
+     *                    - narration: Short description 4-22 chars (required)
+     *                    - reason: Payment reason 1-50 chars (optional)
+     *                    - phoneNumber: Customer phone number (optional)
+     *                    - country: ISO 3166-1 alpha-3 country code (optional)
+     *                    - language: Payment page language (optional)
+     *                    - amountDetails: Fixed amount configuration (optional)
+     *                    - metadata: Additional context data (optional)
+     * @return array Response containing redirectURL
+     * @throws PaymentGatewayException
+     */
+    public function createPaymentPage(array $data): array
+    {
+        try {
+            $preparedData = $this->preparePaymentPageData($data);
+            error_log("PawaPay Payment Page Payload: " . json_encode($preparedData));
+
+            $response = $this->httpClient->post('/v2/payment-page/deposit', [
+                'json' => $preparedData
+            ]);
+
+            $result = json_decode($response->getBody()->getContents(), true);
+            
+            // Store payment page session for tracking
+            $this->storePaymentPageSession($preparedData['depositId'], $result, $preparedData);
+            
+            return $result;
+        } catch (\GuzzleHttp\Exception\ClientException $e) {
+            $responseBody = $e->hasResponse() ? (string) $e->getResponse()->getBody() : 'No response body';
+            error_log("PawaPay Payment Page Error: " . $responseBody);
+            
+            throw new PaymentGatewayException(
+                "Failed to create payment page: " . $e->getMessage() . " | Response: " . $responseBody,
+                0,
+                [
+                    'raw_error' => $e,
+                    'response_body' => $responseBody,
+                    'request_payload' => $preparedData
+                ]
+            );
+        } catch (\Exception $e) {
+            throw new PaymentGatewayException(
+                "Failed to create payment page: " . $e->getMessage(),
+                0,
+                ['raw_error' => $e]
+            );
+        }
+    }
+
+    /**
      * Initiate a deposit transaction
      *
      * @param array $data Deposit data
@@ -862,6 +919,283 @@ class PawaPay
         if (!isset($config['api']['token'])) {
             throw new PaymentGatewayException("Missing required configuration field: api.token");
         }
+    }
+
+    /**
+     * Prepare payment page data for API call
+     *
+     * @param array $data
+     * @return array
+     * @throws PaymentGatewayException
+     */
+    private function preparePaymentPageData(array $data): array
+    {
+        // Validate required fields
+        $required = ['returnUrl', 'narration'];
+        foreach ($required as $field) {
+            if (empty($data[$field])) {
+                throw new PaymentGatewayException("Missing required payment page field: {$field}");
+            }
+        }
+
+        // Generate depositId if not provided (UUIDv4 format)
+        $depositId = $data['depositId'] ?? sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,  // Version 4
+            mt_rand(0, 0x3fff) | 0x8000,  // Variant
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
+
+        // Validate narration length (4-22 characters)
+        if (strlen($data['narration']) < 4 || strlen($data['narration']) > 22) {
+            throw new PaymentGatewayException("Narration must be between 4 and 22 characters");
+        }
+
+        $payload = [
+            'depositId' => $depositId,
+            'returnUrl' => $data['returnUrl'],
+            'narration' => $data['narration']
+        ];
+
+        // Add optional fields
+        if (!empty($data['reason'])) {
+            if (strlen($data['reason']) < 1 || strlen($data['reason']) > 50) {
+                throw new PaymentGatewayException("Reason must be between 1 and 50 characters");
+            }
+            $payload['reason'] = $data['reason'];
+        }
+
+        if (!empty($data['phoneNumber'])) {
+            // Validate phone number format
+            if (!$this->validatePhoneNumberFormat($data['phoneNumber'])) {
+                throw new PaymentGatewayException("Invalid phone number format. Use digits only with country code, no '+' prefix");
+            }
+            $payload['phoneNumber'] = $data['phoneNumber'];
+        }
+
+        if (!empty($data['country'])) {
+            // Validate country code (ISO 3166-1 alpha-3)
+            if (!preg_match('/^[A-Z]{3}$/', $data['country'])) {
+                throw new PaymentGatewayException("Country must be ISO 3166-1 alpha-3 format (e.g., 'KEN')");
+            }
+            $payload['country'] = strtoupper($data['country']);
+        }
+
+        if (!empty($data['language'])) {
+            $payload['language'] = $data['language'];
+        }
+
+        if (!empty($data['amountDetails'])) {
+            $payload['amountDetails'] = $this->prepareAmountDetails($data['amountDetails']);
+        }
+
+        if (!empty($data['metadata']) && is_array($data['metadata'])) {
+            if (count($data['metadata']) > 10) {
+                throw new PaymentGatewayException("Maximum 10 metadata fields allowed");
+            }
+            $payload['metadata'] = $data['metadata'];
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Prepare amount details for payment page
+     *
+     * @param array $amountDetails
+     * @return array
+     * @throws PaymentGatewayException
+     */
+    private function prepareAmountDetails(array $amountDetails): array
+    {
+        $required = ['amount', 'currency'];
+        foreach ($required as $field) {
+            if (!isset($amountDetails[$field])) {
+                throw new PaymentGatewayException("Missing required amount detail field: {$field}");
+            }
+        }
+
+        // Ensure amount is string format
+        $amount = is_string($amountDetails['amount']) ? 
+            $amountDetails['amount'] : 
+            number_format((float)$amountDetails['amount'], 2, '.', '');
+
+        return [
+            'amount' => $amount,
+            'currency' => strtoupper($amountDetails['currency'])
+        ];
+    }
+
+    /**
+     * Validate phone number format for payment page
+     *
+     * @param string $phoneNumber
+     * @return bool
+     */
+    private function validatePhoneNumberFormat(string $phoneNumber): bool
+    {
+        // Phone number should be digits only, with country code, no '+' prefix
+        // Should not start with zero
+        return preg_match('/^[1-9][0-9]{8,14}$/', $phoneNumber) === 1;
+    }
+
+    /**
+     * Store payment page session for tracking and validation
+     *
+     * @param string $depositId
+     * @param array $response
+     * @param array $originalData
+     * @return void
+     */
+    private function storePaymentPageSession(string $depositId, array $response, array $originalData): void
+    {
+        $sessionData = [
+            'deposit_id' => $depositId,
+            'redirect_url' => $response['redirectURL'] ?? null,
+            'return_url' => $originalData['returnUrl'],
+            'created_at' => date('Y-m-d H:i:s'),
+            'expires_at' => date('Y-m-d H:i:s', strtotime('+15 minutes')), // Payment pages expire after 15 minutes
+            'status' => 'created',
+            'metadata' => $originalData['metadata'] ?? []
+        ];
+
+        // Store in session file (you can replace this with database storage)
+        $sessionFile = __DIR__ . '/storage/payment_sessions/' . $depositId . '.json';
+        $sessionDir = dirname($sessionFile);
+
+        if (!is_dir($sessionDir)) {
+            mkdir($sessionDir, 0777, true);
+        }
+
+        file_put_contents($sessionFile, json_encode($sessionData, JSON_PRETTY_PRINT));
+        
+        error_log("Payment page session stored: {$depositId}");
+    }
+
+    /**
+     * Get payment page session data
+     *
+     * @param string $depositId
+     * @return array|null
+     */
+    public function getPaymentPageSession(string $depositId): ?array
+    {
+        $sessionFile = __DIR__ . '/storage/payment_sessions/' . $depositId . '.json';
+        
+        if (!file_exists($sessionFile)) {
+            return null;
+        }
+
+        $sessionData = json_decode(file_get_contents($sessionFile), true);
+        
+        // Check if session is expired
+        if (strtotime($sessionData['expires_at']) < time()) {
+            $sessionData['status'] = 'expired';
+        }
+
+        return $sessionData;
+    }
+
+    /**
+     * Handle return from payment page
+     *
+     * This method processes the customer return from the payment page
+     * and provides the payment status.
+     *
+     * @param string $depositId The deposit ID from the return URL
+     * @return array Payment status and details
+     * @throws PaymentGatewayException
+     */
+    public function handlePaymentPageReturn(string $depositId): array
+    {
+        try {
+            // Get session data
+            $session = $this->getPaymentPageSession($depositId);
+            if (!$session) {
+                throw new PaymentGatewayException("Payment session not found: {$depositId}");
+            }
+
+            // Check current deposit status via API
+            $depositStatus = $this->checkDepositStatus($depositId);
+            
+            // Update session status
+            $session['status'] = $this->mapDepositStatus($depositStatus['status'] ?? 'unknown');
+            $session['updated_at'] = date('Y-m-d H:i:s');
+            $session['deposit_response'] = $depositStatus;
+            
+            // Save updated session
+            $this->updatePaymentPageSession($depositId, $session);
+            
+            return [
+                'depositId' => $depositId,
+                'status' => $session['status'],
+                'deposit_details' => $depositStatus,
+                'session_data' => $session,
+                'return_handled_at' => date('Y-m-d H:i:s')
+            ];
+        } catch (\Exception $e) {
+            error_log("Payment page return handling error: " . $e->getMessage());
+            throw new PaymentGatewayException(
+                "Failed to handle payment page return: " . $e->getMessage(),
+                0,
+                ['deposit_id' => $depositId, 'raw_error' => $e]
+            );
+        }
+    }
+
+    /**
+     * Map PawaPay deposit status to internal status
+     *
+     * @param string $pawaPayStatus
+     * @return string
+     */
+    private function mapDepositStatus(string $pawaPayStatus): string
+    {
+        $statusMap = [
+            'ACCEPTED' => 'accepted',
+            'ENQUEUED' => 'pending', 
+            'SUBMITTED' => 'processing',
+            'IN_RECONCILIATION' => 'reconciling',
+            'COMPLETED' => 'completed',
+            'FAILED' => 'failed',
+            'REJECTED' => 'rejected',
+            'DUPLICATE' => 'duplicate'
+        ];
+
+        return $statusMap[strtoupper($pawaPayStatus)] ?? 'unknown';
+    }
+
+    /**
+     * Update payment page session data
+     *
+     * @param string $depositId
+     * @param array $sessionData
+     * @return void
+     */
+    private function updatePaymentPageSession(string $depositId, array $sessionData): void
+    {
+        $sessionFile = __DIR__ . '/storage/payment_sessions/' . $depositId . '.json';
+        file_put_contents($sessionFile, json_encode($sessionData, JSON_PRETTY_PRINT));
+    }
+
+    /**
+     * Get redirect URL for payment processing
+     *
+     * Convenience method to get the redirect URL from a payment page response
+     *
+     * @param array $paymentPageResponse Response from createPaymentPage()
+     * @return string The URL to redirect customer to
+     * @throws PaymentGatewayException
+     */
+    public function getRedirectUrl(array $paymentPageResponse): string
+    {
+        if (!isset($paymentPageResponse['redirectURL'])) {
+            throw new PaymentGatewayException("No redirect URL found in payment page response");
+        }
+
+        return $paymentPageResponse['redirectURL'];
     }
 
     /**

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         processIsolation="false"
+         stopOnFailure="false"
+         executionOrder="depends,defects"
+         failOnWarning="true"
+         failOnRisky="true"
+         failOnEmptyTestSuite="true"
+         beStrictAboutOutputDuringTests="true"
+         cacheDirectory=".phpunit.cache"
+         backupGlobals="false">
+    
+    <testsuites>
+        <testsuite name="Unit">
+            <directory suffix="Test.php">tests/Unit</directory>
+        </testsuite>
+        
+        <testsuite name="Integration">
+            <directory suffix="Test.php">tests/Integration</directory>
+        </testsuite>
+        
+        <testsuite name="Feature">
+            <directory suffix="Test.php">tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+        </include>
+        <exclude>
+            <directory suffix=".php">src/modesy_integration</directory>
+            <file>src/helpers.php</file>
+        </exclude>
+    </source>
+    
+    <php>
+        <env name="PAWAPAY_ENVIRONMENT" value="sandbox"/>
+        <env name="PAWAPAY_TEST_MODE" value="true"/>
+        <env name="PAWAPAY_DEBUG_MODE" value="true"/>
+        <env name="PAWAPAY_TEST_SKIP_SSL" value="false"/>
+        <env name="PAWAPAY_LOG_LEVEL" value="debug"/>
+        <env name="PAWAPAY_CACHE_FEES" value="false"/>
+    </php>
+    
+    <logging>
+        <testdoxHtml outputFile="tests/reports/testdox.html"/>
+        <testdoxText outputFile="tests/reports/testdox.txt"/>
+    </logging>
+</phpunit>
